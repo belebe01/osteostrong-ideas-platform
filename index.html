@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OsteoStrong Idea Platform</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide-react@0.263.1/dist/umd/lucide-react.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+</head>
+<body>
+  <div id="idea-platform-container" style="width: 100%; max-width: 1200px; margin: 0 auto;">
+    <div id="loading-indicator" style="text-align: center; padding: 50px;">
+      Loading Idea Platform...
+    </div>
+  </div>
+
+  <script type="text/babel">
+// Initialize Firebase with your config
+const firebaseConfig = {
+  apiKey: "AIzaSyC9-By7kQFnnrK_kEvG-mUBj1-3GNOIg-M",
+  authDomain: "osteostrong-ideas.firebaseapp.com",
+  projectId: "osteostrong-ideas",
+  storageBucket: "osteostrong-ideas.firebasestorage.app",
+  messagingSenderId: "925008990678",
+  appId: "1:925008990678:web:52a828a7790c465526d477"
+};
+
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const auth = firebase.auth();
+
+// Main component
+const IdeaManagementPlatform = () => {
+  const [ideas, setIdeas] = React.useState([]);
+  const [filteredIdeas, setFilteredIdeas] = React.useState([]);
+  const [newIdeaTitle, setNewIdeaTitle] = React.useState('');
+  const [newIdeaDescription, setNewIdeaDescription] = React.useState('');
+  const [searchTerm, setSearchTerm] = React.useState('');
+  const [filter, setFilter] = React.useState('all');
+  const [showSubmitForm, setShowSubmitForm] = React.useState(false);
+  const [submissionMessage, setSubmissionMessage] = React.useState('');
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [loggedInUser, setLoggedInUser] = React.useState(null);
+  const [isAdmin, setIsAdmin] = React.useState(false);
+  const [pendingIdeas, setPendingIdeas] = React.useState([]);
+
+  // Check authentication status
+  React.useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+      if (user) {
+        // User is signed in
+        try {
+          const userDoc = await db.collection('users').doc(user.uid).get();
+          if (userDoc.exists) {
+            const userData = userDoc.data();
+            setLoggedInUser({
+              id: user.uid,
+              name: userData.name || user.displayName || user.email,
+              role: userData.role || 'member',
+              location: userData.location || 'Unknown'
+            });
+            setIsAdmin(userData.role === 'admin');
+          } else {
+            // Create user document if it doesn't exist
+            const newUserData = {
+              name: user.displayName || user.email,
+              email: user.email,
+              role: 'member',
+              location: 'Unknown',
+              dateJoined: new Date()
+            };
+            await db.collection('users').doc(user.uid).set(newUserData);
+            setLoggedInUser({
+              id: user.uid,
+              ...newUserData
+            });
+            setIsAdmin(false);
+          }
+        } catch (error) {
+          console.error("Error fetching user data:", error);
+        }
+      } else {
+        // User is signed out
+        setLoggedInUser(null);
+        setIsAdmin(false);
+      }
+    });
+    
+    return () => unsubscribe();
+  }, []);
+
+  // Fetch ideas from Firestore
+  React.useEffect(() => {
+    const fetchIdeas = async () => {
+      setIsLoading(true);
+      try {
+        // Fetch approved ideas
+        const approvedSnapshot = await db.collection('ideas')
+          .where('status', '==', 'approved')
+          .get();
+        
+        const approvedIdeas = approvedSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        
+        setIdeas(approvedIdeas);
+        setFilteredIdeas(approvedIdeas);
+        
+        // Fetch pending ideas if user is admin
+        if (isAdmin) {
+          const pendingSnapshot = await db.collection('ideas')
+            .where('status', '==', 'pending')
+            .get();
+          
+          const pendingIdeas = pendingSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }));
+          
+          setPendingIdeas(pendingIdeas);
+        }
+      } catch (error) {
+        console.error("Error fetching ideas:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
+    fetchIdeas();
+  }, [isAdmin]);
+
+  // Apply filtering and searching
+  React.useEffect(() => {
+    // Apply filtering and searching when ideas, filter, or searchTerm changes
+    let results = [...ideas];
+    
+    // Apply filtering
+    if (filter === 'mostVoted') {
+      results = results.sort((a, b) => (b.upvote - b.downvote) - (a.upvote - a.downvote));
+    } else if (filter === 'recent') {
+      results = results.sort((a, b) => new Date(b.dateApproved) - new Date(a.dateApproved));
+    }
+    
+    // Apply search
+    if (searchTerm) {
+      const lowercasedTerm = searchTerm.toLowerCase();
+      results = results.filter(idea => 
+        idea.title.toLowerCase().includes(lowercasedTerm) || 
+        idea.description.toLowerCase().includes(lowercasedTerm) ||
+        (idea.tags && idea.tags.some(tag => tag.toLowerCase().includes(lowercasedTerm)))
+      );
+    }
+    
+    setFilteredIdeas(results);
+  }, [ideas, filter, searchTerm]);
+
+  // Handle voting
+  const handleUpvote = async (ideaId) => {
+    if (!loggedInUser) {
+      alert("Please sign in to vote on ideas");
+      return;
+    }
+    
+    try {
+      // Check if user already voted
+      const voteRef = db.collection('votes').doc(`${ideaId}_${loggedInUser.id}`);
+      const voteDoc = await voteRef.get();
+      
+      if (voteDoc.exists) {
+        const voteData = voteDoc.data();
+        if (voteData.vote === 'up') {
+          alert("You've already upvoted this idea");
+          return;
+        } else {
+          // Change from downvote to upvote
+          await voteRef.update({ vote: 'up' });
+          
+          // Update idea document
+          const ideaRef = db.collection('ideas').doc(ideaId);
+          await ideaRef.update({
+            upvote: firebase.firestore.FieldValue.increment(1),
+            downvote: firebase.firestore.FieldValue.increment(-1)
+          });
+          
+          // Update local state
+          setIdeas(ideas.map(idea => 
+            idea.id === ideaId ? { 
+              ...idea, 
+              upvote: idea.upvote + 1,
+              downvote: idea.downvote - 1
+            } : idea
+          ));
+        }
+      } else {
+        // New vote
+        await voteRef.set({
+          userId: loggedInUser.id,
+          ideaId: ideaId,
+          vote: 'up',
+          timestamp: new Date()
+        });
+        
+        // Update idea document
+        const ideaRef = db.collection('ideas').doc(ideaId);
+        await ideaRef.update({
+          upvote: firebase.firestore.FieldValue.increment(1)
+        });
+        
+        // Update local state
+        setIdeas(ideas.map(idea => 
+          idea.id === ideaId ? { ...idea, upvote: idea.upvote + 1 } : idea
+        ));
+      }
+    } catch (error) {
+      console.error("Error upvoting:", error);
+      alert("Error recording your vote. Please try again.");
+    }
+  };
+
+  const handleDownvote = async (ideaId) => {
+    if (!loggedInUser) {
+      alert("Please sign in to vote on ideas");
+      return;
+    }
+    
+    try {
+      // Check if user already voted
+      const voteRef = db.collection('votes').doc(`${ideaId}_${loggedInUser.id}`);
+      const voteDoc = await voteRef.get();
+      
+      if (voteDoc.exists) {
+        const voteData = voteDoc.data();
+        if (voteData.vote === 'down') {
+          alert("You've already downvoted this idea");
+          return;
+        } else {
+          // Change from upvote to downvote
+          await voteRef.update({ vote: 'down' });
+          
+          // Update idea document
+          const ideaRef = db.collection('ideas').doc(ideaId);
+          await ideaRef.update({
+            upvote: firebase.firestore.FieldValue.increment(-1),
+            downvote: firebase.firestore.FieldValue.increment(1)
+          });
+          
+          // Update local state
+          setIdeas(ideas.map(idea => 
+            idea.id === ideaId ? { 
+              ...idea, 
+              upvote: idea.upvote - 1,
+              downvote: idea.downvote + 1
+            } : idea
+          ));
+        }
+      } else {
+        // New vote
+        await voteRef.set({
+          userId: loggedInUser.id,
+          ideaId: ideaId,
+          vote: 'down',
+          timestamp: new Date()
+        });
+        
+        // Update idea document
+        const ideaRef = db.collection('ideas').doc(ideaId);
+        await ideaRef.update({
+          downvote: firebase.firestore.FieldValue.increment(1)
+        });
+        
+        // Update local state
+        setIdeas(ideas.map(idea => 
+          idea.id === ideaId ? { ...idea, downvote: idea.downvote + 1 } : idea
+        ));
+      }
+    } catch (error) {
+      console.error("Error downvoting:", error);
+      alert("Error recording your vote. Please try again.");
+    }
+  };
+  Add index.html with complete idea platform code
+
+  // Submit new idea
+  const handleSubmitIdea = async () => {
+    if (!loggedInUser) {
+      alert("Please sign in to submit ideas");
+      return;
+    }
+    
+    // Validate inputs
+    if (!newIdeaTitle.trim() || !newIdeaDescription.trim()) {
+      alert("Please provide both a title and description for your idea");
+      return;
+    }
+    
+    try {
+      // Create new idea document
+      const newIdea = {
+        title: newIdeaTitle,
+        description: newIdeaDescription,
+        author: loggedInUser.name,
+        authorId: loggedInUser.id,
+        location: loggedInUser.location,
+        status: 'pending',
+        dateSubmitted: new Date(),
+        upvote: 0,
+        downvote: 0,
+        tags: []
+      };
+      
+      const docRef = await db.collection('ideas').add(newIdea);
+      
+      // Add to pending ideas if admin
+      if (isAdmin) {
+        setPendingIdeas([...pendingIdeas, {
+          id: docRef.id,
+          ...newIdea
+        }]);
+      }
+      
+      // Reset form
+      setNewIdeaTitle('');
+      setNewIdeaDescription('');
+      setShowSubmitForm(false);
+      
+      // Show confirmation message
+      setSubmissionMessage('Your idea has been submitted for approval. Thank you!');
+      setTimeout(() => setSubmissionMessage(''), 5000);
+    } catch (error) {
+      console.error("Error submitting idea:", error);
+      alert("Error submitting your idea. Please try again.");
+    }
+  };
+
+  // Approve idea
+  const approveIdea = async (ideaId) => {
+    if (!isAdmin) return;
+    
+    try {
+      // Update idea document
+      await db.collection('ideas').doc(ideaId).update({
+        status: 'approved',
+        dateApproved: new Date()
+      });
+      
+      // Get the updated idea
+      const ideaDoc = await db.collection('ideas').doc(ideaId).get();
+      const approvedIdea = {
+        id: ideaDoc.id,
+        ...ideaDoc.data()
+      };
+      
+      // Remove from pending ideas
+      setPendingIdeas(pendingIdeas.filter(idea => idea.id !== ideaId));
+      
+      // Add to approved ideas
+      setIdeas([...ideas, approvedIdea]);
+    } catch (error) {
+      console.error("Error approving idea:", error);
+      alert("Error approving the idea. Please try again.");
+    }
+  };
+
+  // Reject idea
+  const rejectIdea = async (ideaId) => {
+    if (!isAdmin) return;
+    
+    try {
+      // Update idea document
+      await db.collection('ideas').doc(ideaId).update({
+        status: 'rejected'
+      });
+      
+      // Remove from pending ideas
+      setPendingIdeas(pendingIdeas.filter(idea => idea.id !== ideaId));
+    } catch (error) {
+      console.error("Error rejecting idea:", error);
+      alert("Error rejecting the idea. Please try again.");
+    }
+  };
+
+  // Sign in function
+  const signIn = async () => {
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await auth.signInWithPopup(provider);
+    } catch (error) {
+      console.error("Error signing in:", error);
+    }
+  };
+
+  // Sign out function
+  const signOut = async () => {
+    try {
+      await auth.signOut();
+    } catch (error) {
+      console.error("Error signing out:", error);
+    }
+  };
+
+  // Rest of component (UI rendering)
+  return (
+    <div className="bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="bg-blue-800 text-white py-6 px-4 md:px-8">
+        <div className="max-w-6xl mx-auto flex justify-between items-center">
+          <div>
+            <h1 className="text-3xl font-bold">OsteoStrong Idea Hub</h1>
+            <p className="mt-2">Share and vote on ideas to improve our franchise network</p>
+          </div>
+          <div>
+            {loggedInUser ? (
+              <div className="flex items-center gap-3">
+                <span>Hello, {loggedInUser.name}</span>
+                <button 
+                  onClick={signOut}
+                  className="bg-blue-700 hover:bg-blue-600 text-white px-4 py-2 rounded"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button 
+                onClick={signIn}
+                className="bg-blue-700 hover:bg-blue-600 text-white px-4 py-2 rounded"
+              >
+                Sign In
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+      
+      {/* Main content */}
+      <div className="max-w-6xl mx-auto px-4 md:px-8 py-8">
+        {/* Submission success message */}
+        {submissionMessage && (
+          <div className="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 mb-6">
+            <p>{submissionMessage}</p>
+          </div>
+        )}
+        
+        {/* Action bar */}
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+          {/* Search */}
+          <div className="relative w-full md:w-auto">
+            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+              <lucide.Search size={18} className="text-gray-400" />
+            </div>
+            <input
+              type="text"
+              placeholder="Search ideas..."
+              className="pl-10 pr-4 py-2 border border-gray-300 rounded-md w-full md:w-64"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+          
+          <div className="flex items-center gap-4 w-full md:w-auto">
+            {/* Filter */}
+            <div className="relative flex-1 md:flex-none">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <lucide.Filter size={18} className="text-gray-400" />
+              </div>
+              <select
+                className="pl-10 pr-4 py-2 border border-gray-300 rounded-md appearance-none bg-white w-full"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+              >
+                <option value="all">All Ideas</option>
+                <option value="mostVoted">Top Rated</option>
+                <option value="recent">Recently Added</option>
+              </select>
+            </div>
+            
+            {/* Submit new idea button */}
+            <button
+              className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-md flex items-center gap-2 flex-1 md:flex-none justify-center"
+              onClick={() => {
+                if (!loggedInUser) {
+                  signIn();
+                } else {
+                  setShowSubmitForm(true);
+                }
+              }}
+            >
+              <lucide.PlusCircle size={18} />
+              <span>Submit Idea</span>
+            </button>
+          </div>
+        </div>
+        
+        {/* Submit form modal */}
+        {showSubmitForm && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg p-6 w-full max-w-lg">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold">Submit a New Idea</h2>
+                <button 
+                  onClick={() => setShowSubmitForm(false)}
+                  className="text-gray-500 hover:text-gray-700"
+                >
+                  <lucide.X size={20} />
+                </button>
+              </div>
+              
+              <div className="mb-4">
+                <label className="block text-gray-700 text-sm font-bold mb-2">
+                  Title
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  placeholder="A brief title for your idea"
+                  value={newIdeaTitle}
+                  onChange={(e) => setNewIdeaTitle(e.target.value)}
+                />
+              </div>
+              
+              <div className="mb-4">
+                <label className="block text-gray-700 text-sm font-bold mb-2">
+                  Description
+                </label>
+                <textarea
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                  placeholder="Describe your idea in detail"
+                  rows="4"
+                  value={newIdeaDescription}
+                  onChange={(e) => setNewIdeaDescription(e.target.value)}
+                />
+              </div>
+              
+              <div className="flex justify-end gap-3">
+                <button
+                  className="px-4 py-2 text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100"
+                  onClick={() => setShowSubmitForm(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                  onClick={handleSubmitIdea}
+                >
+                  Submit for Approval
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* Loading state */}
+        {isLoading ? (
+          <div className="text-center py-12">
+            <p className="text-gray-500">Loading ideas...</p>
+          </div>
+        ) : (
+          <>
+            {/* Admin section - Pending ideas */}
+            {isAdmin && pendingIdeas.length > 0 && (
+              <div className="mb-8 bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                <h2 className="text-lg font-bold mb-4 text-yellow-800">Ideas Pending Approval ({pendingIdeas.length})</h2>
+                
+                <div className="space-y-4">
+                  {pendingIdeas.map(idea => (
+                    <div key={idea.id} className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+                      <h3 className="font-bold">{idea.title}</h3>
+                      <p className="text-gray-600 text-sm mb-2">{idea.description}</p>
+                      <div className="text-sm text-gray-500 mb-3">
+                        Submitted by {idea.author} from {idea.location} on {idea.dateSubmitted instanceof Date 
+                          ? idea.dateSubmitted.toLocaleDateString() 
+                          : new Date(idea.dateSubmitted).toLocaleDateString()}
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          className="px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200"
+                          onClick={() => rejectIdea(idea.id)}
+                        >
+                          Reject
+                        </button>
+                        <button
+                          className="px-3 py-1 bg-green-100 text-green-700 rounded hover:bg-green-200"
+                          onClick={() => approveIdea(idea.id)}
+                        >
+                          Approve
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            {/* Ideas list */}
+            <div className="space-y-4">
+              {filteredIdeas.length === 0 ? (
+                <div className="text-center py-12 bg-gray-100 rounded-lg">
+                  <p className="text-gray-500">No ideas found matching your search criteria.</p>
+                </div>
+              ) : (
+                filteredIdeas.map(idea => (
+                  <div key={idea.id} className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+                    <div className="flex">
+                      {/* Vote buttons */}
+                      <div className="mr-4 flex flex-col items-center gap-2">
+                        <button 
+                          className="text-blue-500 hover:text-blue-700 focus:outline-none bg-blue-50 hover:bg-blue-100 rounded-full p-2"
+                          onClick={() => handleUpvote(idea.id)}
+                          aria-label="Upvote"
+                        >
+                          <lucide.ThumbsUp size={20} />
+                        </button>
+                        <span className="font-bold text-base text-blue-700">{idea.upvote}</span>
+                        
+                        <button 
+                          className="text-red-500 hover:text-red-700 focus:outline-none bg-red-50 hover:bg-red-100 rounded-full p-2"
+                          onClick={() => handleDownvote(idea.id)}
+                          aria-label="Downvote"
+                        >
+                          <lucide.ThumbsDown size={20} />
+                        </button>
+                        <span className="font-bold text-base text-red-700">{idea.downvote}</span>
+                        
+                        <div className="mt-1 font-semibold text-gray-700">
+                          {idea.upvote - idea.downvote}
+                        </div>
+                      </div>
+                      
+                      {/* Idea content */}
+                      <div className="flex-1">
+                        <h3 className="font-bold text-lg">{idea.title}</h3>
+                        <p className="text-gray-600 mb-2">{idea.description}</p>
+                        <div className="flex flex-wrap items-center text-sm text-gray-500">
+                          <span className="mr-4">By {idea.author} from {idea.location}</span>
+                          <span>Approved {idea.dateApproved instanceof Date 
+                            ? idea.dateApproved.toLocaleDateString() 
+                            : new Date(idea.dateApproved).toLocaleDateString()}
+                          </span>
+                        </div>
+                        
+                        {/* Tags */}
+                        {idea.tags && idea.tags.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {idea.tags.map(tag => (
+                              <span key={tag} className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded-full">
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Render the component
+const domContainer = document.getElementById('idea-platform-container');
+ReactDOM.render(<IdeaManagementPlatform />, domContainer);
+document.getElementById('loading-indicator').style.display = 'none';
+  </script>
+</body>
+</html>
